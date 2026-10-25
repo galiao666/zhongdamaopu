@@ -6,6 +6,8 @@ import { signCosUrl } from "../../../utils/common";
 import { getCatItem } from "../../../utils/cat";
 import { formatDate } from "../../../utils/utils";
 import api from "../../../utils/cloudApi";
+import { getGlobalSettings } from "../../../utils/page";
+import { getRecognizeMode } from "../../../utils/recognize";
 
 const app = getApp();
 
@@ -519,6 +521,8 @@ Page({
     }
     var all_queries = [], new_photos = [];
     var transferFailCount = 0;
+    let syncFailCount = 0;
+    const useMeowid = getRecognizeMode(await getGlobalSettings('recognize', { nocache: true })) === 'meowid';
     for (const photo of photos) {
       if (!photo.mark || photo.mark == "") {
         new_photos.push(photo);
@@ -532,13 +536,8 @@ Page({
           new_photos.push(photo);
           continue;
         }
-        // 先通过审核，再转移归属；读库校验转移结果（旧版云函数会静默失败）
-        all_queries.push((async () => {
-          await api.managePhoto({
-            type: "check",
-            photo: photo,
-            best: false,
-          });
+        // 先转移并校验归属，再审核，确保注册到正确的猫咪档案。
+        all_queries.push(() => (async () => {
           await api.managePhoto({
             type: "transfer",
             photo: photo,
@@ -550,6 +549,8 @@ Page({
           if (!latest || latest.cat_id !== transfer_cat_id) {
             throw new Error('transfer not applied: ' + photo._id);
           }
+          const checked = await api.managePhoto({ type: 'check', photo: latest, best: false });
+          if (checked && checked.meowid && !checked.meowid.ok) syncFailCount++;
         })().then(() => {
           this.addNotice(photo, true);
         }).catch(err => {
@@ -567,11 +568,19 @@ Page({
         best: photo.mark == "best",
       }
 
-      all_queries.push(api.managePhoto(data))
+      all_queries.push(async () => {
+        const checked = await api.managePhoto(data);
+        if (checked && checked.meowid && !checked.meowid.ok) syncFailCount++;
+      })
       this.addNotice(photo, (photo.mark != "delete"));
     }
     // 阻塞一下
-    await Promise.all(all_queries);
+    if (useMeowid) {
+      for (const task of all_queries) await task();
+    } else {
+      await Promise.all(all_queries.map(task => task()));
+    }
+    wx.hideLoading();
 
     // 更新校区照片列表和计数
     var newCount = new_photos.length;
@@ -586,6 +595,8 @@ Page({
         content: transferFailCount + ' 张照片转移未生效（云函数可能未更新，请重新部署后重试），已保留在待审列表中',
         showCancel: false,
       });
+    } else if (syncFailCount > 0) {
+      wx.showModal({ title: '审核完成', content: syncFailCount + ' 张照片未完成 MeowID 同步，可在识猫服务页使用全量同步补传。', showCancel: false });
     } else {
       wx.showToast({
         title: '审核通过',

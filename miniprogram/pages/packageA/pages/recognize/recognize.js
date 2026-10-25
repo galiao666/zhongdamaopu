@@ -14,6 +14,7 @@ import {
 import drawUtils from "../../../../utils/draw";
 import { signPhotoUrls } from  "../../../../utils/cat";
 import api from "../../../../utils/cloudApi";
+import { getRecognizeMode } from "../../../../utils/recognize";
 
 const share_text = text_cfg.app_name + ' - ' + text_cfg.recognize.share_tip;
 const app = getApp();
@@ -38,9 +39,9 @@ Page({
     catBoxList: [], // 展示的猫猫框列表
     catIdx: null, // 在有多只猫猫的图片中，识别的猫猫的编号（UI 高亮用，= 数组位置）
     catMeowIdx: null, // 传给后端的候选下标（取自 catBox.index），与数组位置可能不一致
-    quota: null, // 今日识别额度 { left, limit, used, adEnabled, adBonus, adLeft }，由云函数返回
     unknownCat: false, // 检测到猫但身份未确认
-    videoAdLoaded: false, // 激励视频是否就绪
+    recognizeMode: 'off',
+    catCount: 0,
     showResultBox: false, // 用来配合动画延时展示resultBox
     showAdBox: true, // 展示banner广告
     ad: {},
@@ -70,94 +71,22 @@ Page({
 
     this.checkAuth();
 
-    // 设置广告ID
-    const ads = await getGlobalSettings('ads') || {};
-    this.setData({
-      ad: {
-        banner: ads.recognize_banner
-      },
-    })
-
-    this.loadRewardAd(ads);
-  },
-
-  // 激励视频：看广告领识别次数，用法与徽章模块一致。
-  // 注意：广告完成回调只是客户端事件，不构成服务端凭证；
-  // 是否真的发放由云函数的 RECOGNIZE_AD_ENABLED 决定，并有每日领取上限。
-  loadRewardAd(ads) {
-    if (!wx.createRewardedVideoAd) {
-      return;
-    }
-    // 优先用识猫页专属广告位，没配就回退到徽章页的激励视频位
-    const adUnitId = ads.recognize_video || ads.badge_video;
-    if (!adUnitId) {
-      console.log('未配置激励视频广告位');
-      return;
-    }
-    const videoAd = wx.createRewardedVideoAd({ adUnitId });
-    videoAd.onLoad(() => {
-      this.setData({ videoAdLoaded: true });
-    });
-    videoAd.onError((err) => {
-      console.log('reward ad error:', err);
-      this.setData({ videoAdLoaded: false });
-    });
-    videoAd.onClose(async (res) => {
-      // 没看完不给奖励
-      if (!res || !res.isEnded) {
-        return;
-      }
-      await this.grantBonus();
-    });
-    this.jsData.videoAd = videoAd;
-  },
-
-  async grantBonus() {
-    wx.showLoading({ title: '领取中...', mask: true });
-    try {
-      const res = await api.catFace({ action: 'grantBonus' });
-      wx.hideLoading();
-      if (res && res.ok === true && res.quota) {
-        this.setData({ quota: res.quota });
-        wx.showToast({
-          icon: 'none',
-          title: `已获得 ${res.bonus} 次识别机会`,
-          duration: 2000
-        });
-        return;
-      }
-      const code = res && res.code;
-      let title = '领取失败，请稍后再试';
-      if (code === 'bonus_not_supported') title = '暂未开启广告奖励';
-      else if (code === 'bonus_exhausted') title = '今日广告奖励已领完';
-      else if (res && res.msg) title = String(res.msg).slice(0, 30);
-      wx.showToast({ icon: 'none', title: title, duration: 2500 });
-    } catch (e) {
-      console.log('grantBonus error:', e);
-      wx.hideLoading();
-      wx.showToast({ icon: 'none', title: '网络或服务异常' });
-    }
-  },
-
-  tapRewardAd() {
-    const ad = this.jsData.videoAd;
-    if (!ad) {
-      wx.showToast({ icon: 'none', title: '广告未就绪' });
-      return;
-    }
-    ad.show().catch(() => {
-      wx.showToast({ icon: 'none', title: '广告拉取失败，请稍后重试' });
-    });
   },
 
   async onShow() {
-    if (!this.jsData.secretKey) {
-      var settings = await getGlobalSettings('recognize');
-      this.jsData.secretKey = settings.secretKey;
-      await this.recognizeChatImage();
-    } else { // 没杀后台回到聊天重新识别的情况
-      this.recognizeChatImage()
+    const settings = await getGlobalSettings('recognize', { nocache: true });
+    this.jsData.secretKey = settings && settings.secretKey;
+    const mode = getRecognizeMode(settings);
+    this.setData({ unknownCat: false, recognizeMode: mode });
+    if (mode === 'off') {
+      wx.showToast({ icon: 'none', title: '识猫功能已关闭' });
+      return;
     }
+    if (mode === 'custom') {
+      const ads = await getGlobalSettings('ads') || {};
+      this.setData({ ad: { banner: ads.recognize_banner } });
+    }
+    await this.recognizeChatImage();
   },
 
 
@@ -223,6 +152,7 @@ Page({
   },
 
   async recognizePhoto() {
+    this.setData({ catList: [], catBoxList: [], showResultBox: false, unknownCat: false });
     // 检查接口设置：未配置 secretKey 时不上签名，云函数端同样会跳过校验
     // （原逻辑是没密钥直接报错退出；MeowID 方案下签名是可选的）
     if (!this.jsData.secretKey) {
@@ -243,7 +173,6 @@ Page({
 
     // 计算签名
     const photoBase64 = wx.getFileSystemManager().readFileSync(compressPhotoPath, 'base64');
-    console.log(photoBase64);
     const timestamp = Math.round(new Date().getTime() / 1000);
     const signature = hex_sha256(photoBase64 + timestamp + this.jsData.secretKey);
     // 调用云函数 catFace 进行识别
@@ -258,19 +187,13 @@ Page({
     if (this.data.catMeowIdx !== null && this.data.catMeowIdx !== undefined) {
       params.catIdx = this.data.catMeowIdx;
     }
-    console.log(params);
     try {
       const res = await api.catFace(params);
-      // 额度信息（云函数成功时一并返回 { left, limit, used }）
-      if (res && res.quota) {
-        this.setData({ quota: res.quota });
-      }
       if (!res || res.ok !== true) {
         // 服务错误 / 额度不足：不能解释成"照片里没有猫"
         const code = (res && res.code) || '';
         let title = '识别失败，请稍后再试';
-        if (code === 'quota_exceeded') title = '今日识别次数用完啦~';
-        else if (code === 'expired') title = '请求已过期，请重试';
+        if (code === 'expired') title = '请求已过期，请重试';
         else if (code === 'bad_signature') title = '校验失败，请重试';
         else if (code === 'not_configured') title = '识猫服务未配置';
         else if (res && res.msg) title = String(res.msg).slice(0, 30);
@@ -280,6 +203,7 @@ Page({
         return;
       }
       const data = res.data || {};
+      this.setData({ recognizeMode: data.provider || this.data.recognizeMode, catCount: data.catCount || 0 });
       // 检测到猫但云端身份未确认（有候选也不能自动认定）
       this.setData({ unknownCat: !!data.unknown });
       if (!data.catCount) {

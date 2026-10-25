@@ -1,5 +1,7 @@
 // 存放所有需要调用云函数的接口
 import config from "../config";
+import { getGlobalSettings } from "./page";
+import { getRecognizeMode, normalizeRecognizeResponse } from "./recognize";
 
 function getDate(date) {
   date = date ? new Date(date) : new Date();
@@ -71,6 +73,9 @@ async function getMpCode(options) {
 }
 
 async function managePhoto(options) {
+  if (options.type === 'check') {
+    return invokeRecognition('unionOp', { ...options, unionAction: 'managePhoto' }, MEOWID_TIMEOUT_MS);
+  }
   const app = getApp();
   const openid = await getCurrentUserOpenid();
   return (await app.mpServerless.function.invoke('unionOp', {
@@ -322,24 +327,17 @@ async function getTempCOS(options) {
 }
 
 // 识别猫脸
-// 超时预算链（从外到内必须依次递减，否则会出现"后端还在跑、前端已超时"）：
-//   EMAS 平台客户端调用硬上限 60s（不可调，函数必须在此前自己返回）
-//   云函数 catFace 执行超时   120s（EMAS 控制台配置，>60s 即可）
-//   本客户端 SDK 超时         110s（下面 CATFACE_TIMEOUT_MS，>60s 即可）
-//   函数内识别 HTTP 超时       42s（catFace/index.js 的 RECOGNIZE_TIMEOUT_MS）
-// 函数内部预算已整体压到 60s 以内（识别 42s / 建档软 40s / 硬截止 52s），
-// 避免被平台以 FunctionTimeout 强杀；前端只需保证 SDK 超时 >60s 即可。
-// SDK transport 默认 5s 不够用，这里临时调大、调用结束后恢复，避免影响其他云函数调用。
-const CATFACE_TIMEOUT_MS = 110000;
+// 原 catFace 保持 30s；MeowID 与审核上传等待上限为 EMAS 允许的 60s。
+const MEOWID_TIMEOUT_MS = 60000;
 
-async function catFace(options) {
+async function invokeRecognition(functionName, options, timeout) {
   const app = getApp();
   const openid = await getCurrentUserOpenid();
   const transport = app.mpServerless.transport;
   const oldTimeout = transport.timeoutOption;
-  transport.setTimeout(CATFACE_TIMEOUT_MS);
+  transport.setTimeout(timeout);
   try {
-    return (await app.mpServerless.function.invoke('catFace', {
+    return (await app.mpServerless.function.invoke(functionName, {
       ...options,
       openid: openid,
     })).result;
@@ -348,6 +346,22 @@ async function catFace(options) {
   }
 }
 
+async function meowid(options) {
+  return invokeRecognition('unionOp', { ...options, unionAction: 'meowid' }, MEOWID_TIMEOUT_MS);
+}
+
+async function catFace(options = {}) {
+  const settings = await getGlobalSettings('recognize', { nocache: true });
+  const mode = getRecognizeMode(settings);
+  if (mode === 'off') return { ok: false, code: 'recognition_disabled', msg: '识猫功能已关闭' };
+  if (mode === 'custom' && options.action && options.action !== 'search') {
+    return { ok: false, code: 'unsupported_action', msg: '原识猫服务不支持此操作' };
+  }
+  const response = mode === 'meowid'
+    ? await meowid(options)
+    : await invokeRecognition('catFace', options, 30000);
+  return normalizeRecognizeResponse(response, mode);
+}
 
 module.exports = {
   curdOp,
@@ -377,5 +391,6 @@ module.exports = {
   getURL,
   getTempCOS,
   catFace,
+  meowid,
   getCurrentUserOpenid
 };
