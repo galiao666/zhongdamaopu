@@ -1,5 +1,5 @@
 const crypto = require('crypto');
-const { READ_TIMEOUT_MS, LEASE_TIMEOUT_MS, RESPONSE_RESERVE_MS, WRITE_BUDGET_MS, PHOTO_BUDGET_MS } = require('./meowidTiming');
+const { READ_TIMEOUT_MS, LEASE_TIMEOUT_MS, RESPONSE_RESERVE_MS, WRITE_BUDGET_MS, PHOTO_BUDGET_MS, UPLOAD_RESERVE_MS } = require('./meowidTiming');
 
 function stateId(config) {
   return 'meowidSync-' + crypto.createHash('sha256').update(config.projectId).digest('hex').slice(0, 20);
@@ -41,7 +41,7 @@ async function status(ctx, config) {
     count('photo', { ...project, $or: [receiptQuery,
       { 'meowid_sync.status': { $in: ['queued', 'running', 'completed', 'waiting_user'] } }] }),
     count('photo', { ...project, 'meowid_sync.status': 'completed' }),
-    count('photo', { ...project, 'meowid_sync.status': { $in: ['retry', 'failed', 'blocked'] } }),
+    count('photo', { ...project, 'meowid_sync.status': { $in: ['retry', 'failed', 'blocked', 'cancelled'] } }),
     count('photo', { ...project, $and: [noReceiptQuery], 'meowid_sync.status': { $in: ['submitting', 'uncertain'] } }),
     count('photo', { ...project, 'meowid_sync.status': 'waiting_user' }),
     count('cat', { deleted: { $ne: 1 } }),
@@ -65,8 +65,11 @@ async function run(ctx, config, api, options = {}) {
   const id = stateId(config);
   const owner = crypto.randomBytes(16).toString('hex');
   const now = Date.now();
+  // Uncapped approval uploads claim their own photo below. They do not need the
+  // project-wide batch lease used to enforce manual caps and advance cursors.
+  const singleApproval = !!options.photoId && options.limited !== true;
   let state = {};
-  {
+  if (!singleApproval) {
     const { result: existing } = await collection.findOne({ _id: id });
     if (!existing) {
       try { await collection.insertOne({ _id: id, leaseUntil: 0, catCursor: '', taskOffset: 0 }); }
@@ -75,11 +78,12 @@ async function run(ctx, config, api, options = {}) {
     await collection.updateOne({ _id: id, $or: [{ leaseUntil: { $lte: now } }, { leaseUntil: { $exists: false } }] },
       { $set: { leaseOwner: owner, leaseUntil: now + LEASE_TIMEOUT_MS } });
     state = (await collection.findOne({ _id: id })).result;
-    if (!state || state.leaseOwner !== owner) return { ok: true, busy: true, sync: await status(ctx, config) };
+    if (!state || state.leaseOwner !== owner) return options.photoId ? { ok: true, busy: true } : { ok: true, busy: true, sync: await status(ctx, config) };
   }
   const base = '/v1/projects/' + encodeURIComponent(config.projectId);
   // Only an explicitly limited batch uses the cap. Approval uploads and older
-  // clients default to all approved photos; every mode shares the same lease.
+  // clients default to all approved photos. Manual modes share a project lease;
+  // all uploads still share the atomic per-photo claim and receipt guards.
   const limited = options.limited === true;
   const syncMode = limited ? 'limited' : 'all';
   let phase = state.phase || (state.scanning === false ? 'photos' : 'cats');
@@ -239,7 +243,8 @@ async function run(ctx, config, api, options = {}) {
             await savePhoto(latest, { status: 'retry', error: '猫咪档案创建中或结果待核对，请检查 cat.meowid_sync', nextAttemptAt: Date.now() + 300000 });
             continue;
           }
-          if (!timeLeft(PHOTO_BUDGET_MS)) {
+          // Cat creation has already finished; reserve the remaining download/upload budget.
+          if (!timeLeft(UPLOAD_RESERVE_MS)) {
             await savePhoto(latest, { status: 'retry', error: '本批次时间不足，下一批继续上传' });
             break;
           }
@@ -264,8 +269,13 @@ async function run(ctx, config, api, options = {}) {
           const source = crypto.createHash('sha256').update(config.projectId + '\0' + String(latest._id)).digest('hex').slice(0, 32);
           const uploadFilename = 'meowid-' + source + '-' + sha256.slice(0, 16);
           if (!await savePhoto(latest, { status: 'submitting', remoteCatId: remote, sha256, uploadFilename })) continue;
-          const lease = (await collection.findOne({ _id: id })).result;
-          if (!lease || lease.leaseOwner !== owner || lease.leaseUntil <= Date.now()) {
+          const lease = singleApproval
+            ? (await db.collection('photo').findOne({ _id: latest._id,
+              'meowid_sync.projectId': config.projectId, 'meowid_sync.owner': owner,
+              'meowid_sync.status': 'submitting', 'meowid_sync.leaseUntil': { $gt: Date.now() },
+            })).result
+            : (await collection.findOne({ _id: id })).result;
+          if (!lease || (!singleApproval && (lease.leaseOwner !== owner || lease.leaseUntil <= Date.now()))) {
             await savePhoto(latest, { status: 'retry', error: '批次已被接管，尚未提交图片' }, 'submitting');
             continue;
           }
@@ -280,11 +290,11 @@ async function run(ctx, config, api, options = {}) {
           } catch (error) {
             const status = uncertain(error) ? 'uncertain' : [400, 413, 415, 422].includes(error.status) ? 'failed' : 'retry';
             await savePhoto(latest, { status, remoteCatId: remote,
-              error: message(error), nextAttemptAt: Date.now() + 300000 }, 'submitting');
+              error: message(error), requestId: error.requestId || '', nextAttemptAt: Date.now() + 300000 }, 'submitting');
             lastError = report(error);
           }
         } catch (error) {
-          await savePhoto(latest, { status: attemptedUpload ? 'uncertain' : 'retry', error: message(error), nextAttemptAt: Date.now() + 300000 }, attemptedUpload ? 'submitting' : 'downloading');
+          await savePhoto(latest, { status: attemptedUpload ? 'uncertain' : 'retry', error: message(error), requestId: error.requestId || '', nextAttemptAt: Date.now() + 300000 }, attemptedUpload ? 'submitting' : 'downloading');
           lastError = report(error);
         }
       }
@@ -304,7 +314,7 @@ async function run(ctx, config, api, options = {}) {
       let checked = 0;
       for (const task of tasks) {
         if (!timeLeft(1000)) break;
-        if (!task.id || !['queued', 'running', 'completed', 'waiting_user', 'failed'].includes(task.status)) { checked++; continue; }
+        if (!task.id || !['queued', 'running', 'completed', 'waiting_user', 'failed', 'cancelled'].includes(task.status)) { checked++; continue; }
         let photo = (await db.collection('photo').findOne({
           'meowid_sync.projectId': config.projectId, 'meowid_sync.taskId': task.id,
         })).result;
@@ -339,11 +349,15 @@ async function run(ctx, config, api, options = {}) {
     lastError = report(error);
     more = false;
   } finally {
-    const patch = { leaseUntil: 0, lastRunAt: new Date() };
-    if (!options.photoId && (lastError || !options.tasksOnly)) patch.lastError = lastError;
-    if (!options.tasksOnly && !options.photoId) Object.assign(patch, { phase, catCursor: cursor, scanning: phase === 'cats', syncMode });
-    await collection.updateOne({ _id: id, leaseOwner: owner }, { $set: patch });
+    if (!singleApproval) {
+      const patch = { leaseUntil: 0, lastRunAt: new Date() };
+      if (!options.photoId && (lastError || !options.tasksOnly)) patch.lastError = lastError;
+      if (!options.tasksOnly && !options.photoId) Object.assign(patch, { phase, catCursor: cursor, scanning: phase === 'cats', syncMode });
+      await collection.updateOne({ _id: id, leaseOwner: owner }, { $set: patch });
+    }
   }
+  // Approval callers read their own photo receipt; avoid twelve unrelated project counts.
+  if (options.photoId) return { ok: true, processed, more, error: lastError };
   const progress = await status(ctx, config);
   return { ok: true, processed, sync: progress, more };
 }

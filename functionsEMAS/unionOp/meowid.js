@@ -214,7 +214,16 @@ module.exports.syncApprovedPhoto = async (ctx, photoId) => {
     if (current && current.projectId === config.projectId && ['queued', 'running', 'completed', 'waiting_user'].includes(current.status)) {
       return { ok: true, status: current.status };
     }
-    return { ok: false, msg: result.busy ? '同步批次正在执行，稍后可继续同步'  : '同步未完成，请使用全量同步补传' };
+    const sameProject = current && current.projectId === config.projectId;
+    if (sameProject && current.owner && current.leaseUntil > Date.now() &&
+        ['downloading', 'submitting'].includes(current.status)) {
+      return { ok: true, pending: true, status: current.status, msg: '照片正在同步，稍后可刷新状态查看结果' };
+    }
+    return { ok: false, status: result.busy ? 'busy' : sameProject ? current.status : 'pending',
+      requestId: sameProject ? current.requestId || '' : '',
+      msg: result.busy ? '同步批次正在执行，稍后可继续同步'
+        : (sameProject && current.error) || result.error ||
+          (sameProject && current.status === 'cancelled' ? '登记任务已放弃，请先核对平台结果，不会自动重复上传' : '本次未提交，请使用全量同步补传') };
   } catch (error) {
     console.error('[meowid review sync]', error.status || '', error.code || '');
     return { ok: false, msg: '同步失败，可通过全量同步补传' };

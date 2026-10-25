@@ -522,6 +522,16 @@ Page({
     var all_queries = [], new_photos = [];
     var transferFailCount = 0;
     let syncFailCount = 0;
+    let syncPendingCount = 0;
+    const syncErrors = new Set();
+    const recordSync = checked => {
+      if (!checked || !checked.meowid) return;
+      if (checked.meowid.pending) { syncPendingCount++; return; }
+      if (checked.meowid.ok) return;
+      syncFailCount++;
+      const result = checked.meowid;
+      syncErrors.add((result.msg || '未返回具体原因') + (result.requestId ? '（请求编号：' + result.requestId + '）' : ''));
+    };
     const useMeowid = getRecognizeMode(await getGlobalSettings('recognize', { nocache: true })) === 'meowid';
     for (const photo of photos) {
       if (!photo.mark || photo.mark == "") {
@@ -550,7 +560,7 @@ Page({
             throw new Error('transfer not applied: ' + photo._id);
           }
           const checked = await api.managePhoto({ type: 'check', photo: latest, best: false });
-          if (checked && checked.meowid && !checked.meowid.ok) syncFailCount++;
+          recordSync(checked);
         })().then(() => {
           this.addNotice(photo, true);
         }).catch(err => {
@@ -570,7 +580,7 @@ Page({
 
       all_queries.push(async () => {
         const checked = await api.managePhoto(data);
-        if (checked && checked.meowid && !checked.meowid.ok) syncFailCount++;
+        recordSync(checked);
       })
       this.addNotice(photo, (photo.mark != "delete"));
     }
@@ -596,10 +606,10 @@ Page({
         showCancel: false,
       });
     } else if (syncFailCount > 0) {
-      wx.showModal({ title: '审核完成', content: syncFailCount + ' 张照片未完成 MeowID 同步，可在识猫服务页使用全量同步补传。', showCancel: false });
+      wx.showModal({ title: '审核完成', content: syncFailCount + ' 张照片未完成 MeowID 同步。\n' + Array.from(syncErrors).slice(0, 3).join('\n') + '\n可在识猫服务页继续全量同步。', showCancel: false });
     } else {
       wx.showToast({
-        title: '审核通过',
+        title: syncPendingCount ? '审核通过，同步处理中' : '审核通过',
       });
     }
   },

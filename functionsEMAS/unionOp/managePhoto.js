@@ -123,7 +123,7 @@ module.exports = async (ctx) => {
     await recountBestPhotos(photo.cat_id);
     const meowid = await syncApprovedPhoto(ctx, photo._id);
     return { result: true, ok: true, meowid, msg: meowid.ok
-      ? (meowid.skipped ? '审核通过' : '审核通过，照片已提交 MeowID')
+      ? (meowid.skipped ? '审核通过' : meowid.pending ? '审核通过，照片正在同步' : '审核通过，照片已提交 MeowID')
       : '审核通过，MeowID 同步未完成，可使用全量同步补传' };
   } else if (opType == "delete") {
     // 记录照片是否是精选
