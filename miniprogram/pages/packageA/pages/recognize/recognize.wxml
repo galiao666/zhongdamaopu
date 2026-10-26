@@ -12,7 +12,7 @@
 
 <image class="bgImg" src="/pages/public/images/system/background.svg"></image>
 
-<view id="positionWrapper" class="{{catList.length ? 'flowUp' : ''}}">
+<view id="positionWrapper" class="{{catList.length || recognitionMessage ? 'flowUp' : ''}}">
 
   <view id="photoBox">
     <view id="previewArea">
@@ -41,6 +41,11 @@
       <button id="shutter" disabled="{{!cameraAuth}}" bindtap="takePhoto"></button>
       <image class='btn' bindtap='reverseCamera' src='/pages/packageA/pages/images/recognize/reverse.png'></image>
     </view>
+  </view>
+
+  <view id="recognizeStatus" wx:if="{{photoPath && recognitionMessage}}">
+    <view class="status-title">识别提示</view>
+    <view class="status-message">{{recognitionMessage}}</view>
   </view>
 
   <!-- 识别结果 -->
