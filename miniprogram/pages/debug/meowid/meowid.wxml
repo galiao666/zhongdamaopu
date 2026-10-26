@@ -12,7 +12,10 @@
         <view class="field-name">接口签名密钥</view>
         <input class="field-input" password="{{true}}" value="{{pageCfg.secretKey}}" bindinput="pageCfgInput" placeholder="与原识猫服务保持一致" />
       </view>
-      <view class="btn-row"><button class="btn" disabled="{{loading || syncing}}" bindtap="onSavePageCfg">保存识猫模式</button></view>
+      <view class="btn-row">
+        <button class="btn" disabled="{{loading || syncing}}" bindtap="onSavePageCfg">保存识猫模式</button>
+        <button class="btn" bindtap="onCopyGuide">接入文档（复制链接）</button>
+      </view>
     </view>
 
     <block wx:if="{{pageCfg.mode === 'meowid'}}">

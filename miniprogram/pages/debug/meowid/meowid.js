@@ -41,6 +41,18 @@ Page({
 
   pageCfgInput(event) { this.setData({ 'pageCfg.secretKey': event.detail.value }); },
 
+  onCopyGuide() {
+    wx.setClipboardData({
+      data: 'https://meowid.net/zh-cn/developers/zhongdamaopu',
+      success: () => wx.showModal({
+        title: '文档链接已复制',
+        content: '请在浏览器中粘贴打开 MeowID 接入文档。',
+        showCancel: false,
+      }),
+      fail: () => wx.showToast({ icon: 'none', title: '复制失败，请重试' }),
+    });
+  },
+
   async onSavePageCfg() {
     let settings;
     try { settings = await getGlobalSettings(null, { nocache: true }) || {}; }
