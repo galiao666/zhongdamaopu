@@ -327,8 +327,8 @@ async function getTempCOS(options) {
 }
 
 // 识别猫脸
-// 原 catFace 保持 30s；MeowID 与审核上传等待上限为 EMAS 允许的 60s。
-const MEOWID_TIMEOUT_MS = 60000;
+// 原 catFace 保持 30s；MeowID 与审核上传等待上限为 55s（EMAS 硬上限 60s，留 5s 余量让客户端先超时）。
+const MEOWID_TIMEOUT_MS = 55000;
 
 async function invokeRecognition(functionName, options, timeout) {
   const app = getApp();
