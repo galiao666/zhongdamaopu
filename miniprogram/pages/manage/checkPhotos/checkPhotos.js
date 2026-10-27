@@ -572,7 +572,7 @@ Page({
       }
 
       // 准备数据
-      var data = {
+      const data = {
         type: mask2type[photo.mark],
         photo: photo,
         best: photo.mark == "best",
