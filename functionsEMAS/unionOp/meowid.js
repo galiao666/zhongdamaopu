@@ -410,11 +410,6 @@ async function loadSecretKey(ctx) {
   }
 }
 
-async function isSignRequired(ctx) {
-  const key = await loadSecretKey(ctx);
-  return !!(key && key !== 'changeToYourKey');
-}
-
 async function loadCosConfig(ctx) {
   try {
     const { result } = await ctx.mpserverless.db.collection('app_secret').findOne();

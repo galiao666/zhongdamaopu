@@ -30,9 +30,7 @@ Page({
     photoBase64: null, // 用户选择的照片的base64编码，用于设置background-image
     campusList: ['所有校区'],
     campusIndex: 0,
-    campusIndexOld: 0,
     lastFilterType: '',
-    colourIndexOld: 0,
     colourList: ['所有花色'],
     colourIndex: 0,
     catList: [], // 展示的猫猫列表
